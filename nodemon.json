@@ -1,0 +1,6 @@
+{
+  "watch": ["src"],
+  "ignore": ["dist/*", "node_modules/*"],
+  "exec": "npm run nodemonHelper",
+  "ext": "ts,js,json"
+}
