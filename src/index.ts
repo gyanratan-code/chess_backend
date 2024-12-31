@@ -166,6 +166,6 @@ io.on('connection', (socket: Socket) => {
   });
 
 });
-server.listen(3001, () => {
+server.listen(process.env.port||3001, () => {
   console.log('Server running on http://localhost:3000');
 });
