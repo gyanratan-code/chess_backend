@@ -4,10 +4,13 @@ import http from 'http';
 import { Server, Socket } from 'socket.io';
 import { Chess,Move } from 'chess';
 const app = express();
+app.get('/', (req, res) => {
+  res.send('Good Job,Keep this instance active');
+});
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: '*', // Allow all origins; adjust to restrict as needed
+    origin: ['https://chess-hn5l.onrender.com'],
     methods: ['GET', 'POST'],
   },
 });
