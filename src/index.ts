@@ -3,7 +3,6 @@ import * as crypto from 'crypto';
 import http from 'http';
 import { Server, Socket } from 'socket.io';
 import { Chess,Move } from 'chess';
-import { userInfo } from 'os';
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -12,7 +11,7 @@ const io = new Server(server, {
     methods: ['GET', 'POST'],
   },
 });
-
+const dbg= false;
 
 interface Room {
   authToken: string;
@@ -25,6 +24,7 @@ interface Room {
   },
   activePlayer: string,
   timeout?: NodeJS.Timeout;
+  result?: string;
 }
 interface MessageParams{
   roomId : string;
@@ -36,6 +36,7 @@ interface CreateRoomParams {
   username: string;
   authToken: string;
   preference?: string;
+  time? : number;
 }
 
 function generateUniqueId(length: number): string {
@@ -47,45 +48,48 @@ function generateUniqueId(length: number): string {
   // Trim
   return uniqueId.slice(0, length);
 }
-const rooms: Record<string, Room> = {}; // Store rooms with their details
+const rooms: Record<string, Room> = {}; // stores romm details
 
-// Helper function to validate 5-character strings
-const isValidId = (id: string): boolean => true;
-
-// Cleanup function to destroy a room after 10 seconds of inactivity
+// Cleanup function to destroy a room after 60 seconds of inactivity
 const scheduleRoomCleanup = (roomId: string): void => {
   const room = rooms[roomId];
   if (room?.timeout) {
     clearTimeout(room.timeout);
-    console.log(`Existing timeout for room ${roomId} cleared.`);
+    dbg && dbg && console.log(`Existing timeout for room ${roomId} cleared.`);
   }
 
   room.timeout = setTimeout(() => {
     const roomSize = io.sockets.adapter.rooms.get(roomId)?.size || 0;
-    console.log(`Checking room ${roomId}: Size = ${roomSize}`);
+    dbg && console.log(`Checking room ${roomId}: Size = ${roomSize}`);
     if (roomSize === 0) {
       delete rooms[roomId];
-      console.log(`Room ${roomId} has been destroyed.`);
+      dbg && console.log(`Room ${roomId} has been destroyed.`);
     } else {
-      console.log(`Room ${roomId} still has participants, cleanup aborted.`);
+      dbg && console.log(`Room ${roomId} still has participants, cleanup aborted.`);
     }
-  }, 10000);
+  }, 60000);
 };
 
 const switchActivePlayer = (roomId) => {
   const room = rooms[roomId];
+  if(room.gameState===false){
+    return;
+  }
   const currentTime = Date.now();
   const activePlayer = room.activePlayer;
   const opponentPlayer = activePlayer === 'w' ? 'b' : 'w';
 
   // Calculate time spent since the last move
-  const elapsedTime = (currentTime - room.clocks[activePlayer].lastMoveTimestamp) / 1000;
+  const elapsedTime = (currentTime - room.clocks[activePlayer].lastMoveTimestamp);
   room.clocks[activePlayer].remainingTime -= elapsedTime;
 
   // Check if time has run out
   if (room.clocks[activePlayer].remainingTime <= 0) {
-    // \to:do uncomment below line
-    // endGame(roomId, opponentPlayer); // Opponent wins
+    room.clocks[activePlayer].remainingTime = 0;
+    room.result = `${opponentPlayer=='b' ? "Black": "White"} wons on time.`;
+    io.to(roomId).emit('gameEnd',room.result);
+    // \to:do delete room and force disconnect to all client
+    room.gameState= false;
     return;
   }
 
@@ -94,7 +98,7 @@ const switchActivePlayer = (roomId) => {
   room.activePlayer = opponentPlayer;
   room.clocks[opponentPlayer].lastMoveTimestamp = currentTime;
 
-  // Schedule the next timeout dynamically for the new active player
+  // Schedule the next timeout for active player
   scheduleTimeout(roomId);
 };
 
@@ -107,12 +111,12 @@ const scheduleTimeout = (roomId) => {
   clearTimeout(room.timeout);
 
   // Set a new timeout for the active player's remaining time
-  room.timeout = setTimeout(() => switchActivePlayer(roomId), remainingTime * 1000);
+  room.timeout = setTimeout(() => switchActivePlayer(roomId), remainingTime);
 };
 
 // Main Socket.IO connection logic
 io.on('connection', (socket: Socket) => {
-  console.log('A user connected:', socket.id);
+  dbg && console.log('A user connected:', socket.id);
 
   // Room creation
   socket.on('createRoom', (params: CreateRoomParams | string,callback: Function) => {
@@ -127,10 +131,7 @@ io.on('connection', (socket: Socket) => {
     } else {
       parsedParams = params;
     }
-    const { roomId,username, authToken,preference } = parsedParams;
-    if (!isValidId(roomId) || !isValidId(authToken)) {
-      return socket.emit('error', 'Invalid roomId or authToken');
-    }
+    const { roomId,username, authToken,preference,time } = parsedParams;
 
     if (rooms[roomId]) {
       return socket.emit('error', 'Room already exists');
@@ -144,12 +145,12 @@ io.on('connection', (socket: Socket) => {
     roomPartcipants.set(username,((preference && valid()) ? preference:(Math.random()>0.5?'w':'b')));
     const opponentUsername= generateUniqueId(6);
     roomPartcipants.set(opponentUsername,(roomPartcipants.get(username)=='w'?'b':'w'));
-    console.log(roomPartcipants);
+    dbg && console.log(roomPartcipants);
     rooms[roomId] = { authToken:authToken,board:chess, participants: roomPartcipants,gameState:false,clocks:{
-      "w":{remainingTime:300,lastMoveTimestamp:null},
-      "b":{remainingTime:300,lastMoveTimestamp:null},
+      "w":{remainingTime:time || 300*1000,lastMoveTimestamp:null},
+      "b":{remainingTime:time || 300*1000,lastMoveTimestamp:null},
     },activePlayer:'w'};
-    console.log(`Room ${roomId} created with authToken ${authToken}`);
+    dbg && console.log(`Room ${roomId} created with authToken ${authToken}`);
     callback({ success: true, message: `${opponentUsername}` });
     socket.emit('roomCreated', `Room ${roomId} created with username${opponentUsername}`);
   });
@@ -168,9 +169,6 @@ io.on('connection', (socket: Socket) => {
       parsedParams = params;
     }
     const { roomId, authToken,username } = parsedParams;
-    if (!isValidId(roomId) || !isValidId(authToken)) {
-      return socket.emit('error', 'Invalid roomId or authToken');
-    }
     const room = rooms[roomId];
     if (!room) {
       return socket.emit('error', 'Room does not exist');
@@ -185,19 +183,30 @@ io.on('connection', (socket: Socket) => {
     if (currentRoomDetails && currentRoomDetails.size>=2) {
       return socket.emit('error', 'Room is full');
     }
-    console.log()
+    dbg && console.log()
     if(!room.participants.has(username)){
       return socket.emit('error',"You are not part of this room");
     }
     socket.join(roomId);
-    console.log(room.participants[username]);
-    socket.data.roomId = roomId; // Attach roomId to the socket for tracking
-    console.log(room.participants);
-    socket.emit('joinedRoom', {"success":true,"fen":room.board.fen()});
-    socket.emit("roll",room.participants.get(username));
+    dbg && console.log(room.participants[username]);
+    socket.data.roomId = roomId; // Attach roomId to the socket
+    socket.data.username= username; // Attach username to Id
+    dbg && console.log(room.participants);
+    socket.emit('joinedRoom', {"success":true,"fen":room.board.fen(),"gameState":room.gameState,"roll":room.participants.get(username)});
     if(room.gameState===false && io.sockets.adapter.rooms.get(roomId).size==2){
       io.to(roomId).emit('gameStart');
       room.gameState=true;
+      room.clocks.w.lastMoveTimestamp= Date.now();
+      room.clocks.b.lastMoveTimestamp= Date.now();
+      io.to(roomId).emit('clockUpdate', {
+        "w": room.clocks.w.remainingTime,
+        "b": room.clocks.b.remainingTime
+      });
+    }else if(room.gameState){
+      io.to(roomId).emit('clockUpdate', {
+        "w": room.clocks.w.remainingTime-(room.activePlayer==='w' ? (Date.now()-room.clocks.w.lastMoveTimestamp) :0),
+        "b": room.clocks.b.remainingTime-(room.activePlayer==='b' ? (Date.now()-room.clocks.b.lastMoveTimestamp) :0)
+      });
     }
   });
 
@@ -226,8 +235,11 @@ io.on('connection', (socket: Socket) => {
       return socket.emit('error', 'You have not joined this room.');
     }
     // validate move and then set clocks accordingly
+    if(room.gameState==false){
+      socket.emit("gameEnd", room.result);
+    }
     const colorToMove = String(room.board.turn());
-    console.log(colorToMove,room.participants.get(username));
+    dbg && console.log(colorToMove,room.participants.get(username));
     if(colorToMove!=room.participants.get(username)){
       return socket.emit("error","This is not time to make your move");
     }
@@ -254,27 +266,28 @@ io.on('connection', (socket: Socket) => {
     });    
     // Broadcast message to all participants except sender
     socket.to(roomId).emit('receiveMessage', { "sender": username,"message": message });
-    console.log(`User ${socket.id} sent message to room ${roomId}: "${message}"`);
+    dbg && console.log(`User ${socket.id} sent message to room ${roomId}: "${message}"`);
   });
 
   // Handle disconnection
   socket.on('disconnect', () => {
     const roomId = socket.data.roomId;
-    console.log(`User ${socket.id} is disconnecting...`);
+    dbg && console.log(`User ${socket.id} is disconnecting...`);
     if (roomId && rooms[roomId]) {
-      const room = rooms[roomId];
+      io.to(roomId).emit('leftRoom',{"action":"disconnected","username" : socket.data.username});
       const roomDetails= io.sockets.adapter.rooms.get(roomId);
       if (roomDetails==null ||roomDetails.size===0) {
-        console.log(`Room ${roomId} is empty. Scheduling cleanup...`);
+        dbg && console.log(`Room ${roomId} is empty. Scheduling cleanup...`);
         scheduleRoomCleanup(roomId);
       }
     } else {
-      console.log(`User ${socket.id} was not associated with any room.`);
+      dbg && console.log(`User ${socket.id} was not associated with any room.`);
     }
     delete socket.data.roomId;
+    delete socket.data.username;
   });
 
 });
 server.listen(process.env.port||3001, () => {
-  console.log('Server running on http://localhost:3001');
+  dbg && console.log('Server running on http://localhost:3001');
 });
