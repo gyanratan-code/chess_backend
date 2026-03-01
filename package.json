@@ -9,7 +9,7 @@
     "nodemonHelper": "npm run build && node dist/index.js ",
     "dev": "nodemon",
     "start": "pm2 delete all ; npm run build && pm2 start dist/index.js -i 6",
-    "test": "node tests_gpt/test.js",
+    "test": "node tests/test.js",
     "logs": "pm2 logs"
   },
   "keywords": [
