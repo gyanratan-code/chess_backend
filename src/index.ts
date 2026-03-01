@@ -446,7 +446,3 @@ const startServer = async() =>{
 };
 
 startServer();
-
-process.on("SIGINT", async ()=>{
-  await closeDB();
-});
