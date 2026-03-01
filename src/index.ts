@@ -1,28 +1,32 @@
-// load the configuration from .env file
+// loading config
 import dotenv from "dotenv";
-dotenv.config();
-// import all necessary thing for server to run
-import { createClient } from 'redis';
-import { createAdapter } from "@socket.io/redis-adapter";
-import cors from "cors";
-import { validateJwt ,AuthRequest } from "./middleware/validateJwt.js";
-import jwt, { Secret, SignOptions } from "jsonwebtoken";
-import cookie from "cookie";
-import cookieParser from "cookie-parser";
-import authRouter from "./routes/auth.js";
+dotenv.config({quiet: true});
 
-import express from 'express';
-import http from 'http';
-import { Server, Socket } from 'socket.io';
-import { Chess,Move } from 'chess';
-import {RoomParams,MessageParams,generateUniqueId,joinRoomParams} from "./dataType/type.js"
-// debug parameter set to false;
+// debug parameter
 const dbg= false;
 
+// server related 
+import express from 'express';
+import http from 'http';
+import cors from "cors";
+import jwt from "jsonwebtoken";
+import cookie from "cookie";
+import cookieParser from "cookie-parser";
+
+// helper
+import { createClient } from 'redis';
+import { createAdapter } from "@socket.io/redis-adapter";
+import { Server, Socket } from 'socket.io';
+import { Chess } from 'chess';
+
+// local
+import { validateJwt ,AuthRequest } from "./middleware/validateJwt.js";
+import authRouter from "./routes/auth.js";
+import { connectDB, closeDB } from "./config/db.js"
+import { RoomParams, MessageParams, generateUniqueId, joinRoomParams } from "./dataType/type.js"
+import { initUserModel } from "./models/users.js";
+
 const app = express();
-app.get('/', (req, res) => {
-  res.send('Good Job,Keep this instance active');
-});
 
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -41,21 +45,35 @@ app.use(cors({
 app.use(cookieParser());
 
 // protected routes to fetch profile
-app.get(
-  "/profile",
-  validateJwt,
+app.get("/profile",validateJwt,
   (req: AuthRequest, res) => {
     res.json({ id: req.user!.sub, username: req.user!.username });
   }
 );
 app.use(authRouter);
 
+//Redis adapter for scaling
+const pubClient = createClient({ url: process.env.REDIS_URL });
+const subClient = pubClient.duplicate();
+await Promise.all([pubClient.connect(), subClient.connect()]);
+io.adapter(createAdapter(pubClient, subClient));
+pubClient.on("error", (err)=>{
+  console.error("Redis Client Error", err);
+});
+subClient.on("error", (err)=>{
+  console.error("Redis Subscriber Error", err);
+});
+
 // handshake logic
 io.use((socket, next) => {
   const raw = socket.handshake.headers.cookie;
-  if (!raw) return next(new Error("Auth error"));
+  if (!raw){
+    return next(new Error("Auth error"));
+  }
   const { token } = cookie.parse(raw);
-  if (!token) return next(new Error("Auth error"));
+  if (!token){
+    return next(new Error("Auth error"));
+  }
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET!) as {
       sub: string;
@@ -69,14 +87,6 @@ io.use((socket, next) => {
   }
 });
 
-//Redis adapter for scaling
-const pubClient = createClient({ url: process.env.REDIS_URL });
-const subClient = pubClient.duplicate();
-await Promise.all([pubClient.connect(), subClient.connect()]);
-io.adapter(createAdapter(pubClient, subClient));
-pubClient.on("error", err => console.error("Redis Client Error", err));
-subClient.on("error", err => console.error("Redis Subscriber Error", err));
-
 const timeouts = new Map<string, NodeJS.Timeout>();
 
 // switch the active player
@@ -88,23 +98,23 @@ const switchActivePlayer = async (roomId: string) => {
 
   const now = Date.now();
   const active = data.activeColor as "w" | "b";
-  const opponent = active === "w" ? "b" : "w";
+  const opponent = (active === "w" ? "b" : "w");
 
   // Parse clock
-  const clockField = active === "w" ? "clockW" : "clockB";
+  const clockField = (active === "w" ? "clockW" : "clockB");
   const clock = JSON.parse(data[clockField]) as {
     remainingTime: number;
     lastTimestamp: number;
   };
 
   // deduct elapsed time
-  const elapsed = now - clock.lastTimestamp;
-  clock.remainingTime -= elapsed;
+  const elapsed = (now-clock.lastTimestamp);
+  clock.remainingTime-= elapsed;
 
   // Handling timeout based loss
   if (clock.remainingTime <= 0) {
     clock.remainingTime = 0;
-    const winnerName = opponent === "w" ? "White" : "Black";
+    const winnerName = (opponent === "w" ? "White" : "Black");
     const result = `${winnerName} wins on time.`;
     // store final state in redis database
     await pubClient.hSet(key, {
@@ -123,7 +133,7 @@ const switchActivePlayer = async (roomId: string) => {
   }
 
   //Switch active player
-  const oppField = opponent === "w" ? "clockW" : "clockB";
+  const oppField = (opponent === "w" ? "clockW" : "clockB");
   const oppClock = JSON.parse(data[oppField]) as {
     remainingTime: number;
     lastTimestamp: number | null;
@@ -138,12 +148,16 @@ const switchActivePlayer = async (roomId: string) => {
 
   // Broadcast updated clocks
   const rawClockW = await pubClient.hGet(`room:${roomId}`, 'clockW');
-  if (!rawClockW) throw new Error('Missing clockW');
+  if (!rawClockW){
+    throw new Error('Missing clockW');
+  }
   const clockW = JSON.parse(rawClockW.toString());
   const wRemaining = clockW.remainingTime;
 
   const rawClockB = await pubClient.hGet(`room:${roomId}`, 'clockB');
-  if (!rawClockB) throw new Error('Missing clockB');
+  if (!rawClockB){
+    throw new Error('Missing clockB');
+  }
   const clockB = JSON.parse(rawClockB.toString());
   const bRemaining = clockB.remainingTime;
 
@@ -188,9 +202,13 @@ io.on('connection', async (socket: Socket & { data: { user: { sub: string; usern
     // Parse params of room
     let p: RoomParams;
     if (typeof params === 'string') {
-      try { p = JSON.parse(params); }
-      catch { return socket.emit('error', 'Invalid createRoom payload'); }
-    } else {
+      try{
+        p = JSON.parse(params);
+      }
+      catch{
+        return socket.emit('error', 'Invalid createRoom payload');
+      }
+    } else{
       p = params;
     }
     const { opponentUsername,preference, time } = p;
@@ -209,7 +227,12 @@ io.on('connection', async (socket: Socket & { data: { user: { sub: string; usern
     const opponentRole = (userRole === 'w' ? 'b' : 'w');
 
     // store intial room details in redis
-    const initialClock = JSON.stringify({ remainingTime: time || 300000, lastTimestamp: null });
+    const initialClock = JSON.stringify(
+      {
+        remainingTime: time || 300000, 
+        lastTimestamp: null 
+      }
+    );
     await pubClient.hSet(`room:${roomId}`, {
       fen: chess.fen(),
       moves: JSON.stringify([]),
@@ -225,7 +248,7 @@ io.on('connection', async (socket: Socket & { data: { user: { sub: string; usern
 
     // room created's deatil added to socket
     socket.join(roomId);
-    socket.data.roomId = roomId
+    socket.data.roomId = roomId;
     callback({
       success: true,
       roomId : roomId, 
@@ -238,9 +261,13 @@ io.on('connection', async (socket: Socket & { data: { user: { sub: string; usern
   socket.on('joinRoom', async (params: joinRoomParams | string) => {
     let p: joinRoomParams;
     if (typeof params === 'string') {
-      try { p = JSON.parse(params); }
-      catch { return socket.emit('error', 'Invalid joinRoom payload'); }
-    } else {
+      try{
+        p = JSON.parse(params);
+      }
+      catch{
+        return socket.emit('error', 'Invalid joinRoom payload');
+      }
+    } else{
       p = params;
     }
     const { roomId } = p;
@@ -281,8 +308,9 @@ io.on('connection', async (socket: Socket & { data: { user: { sub: string; usern
     socket.emit('joinedRoom', { success: true, fen, gameState: active, roll });
 
     //  On second join -> start game
-    if (!active && io.sockets.adapter.rooms.get(roomId)?.size === 2) {
-      io.to(roomId).emit('gameStart');
+    const updated:any = await pubClient.hGetAll(`room:${roomId}`)
+    const bothPlayerPresent = updated.whitePlayer && updated.blackPlayer;
+    if (!active && bothPlayerPresent) {
       await pubClient.hSet(`room:${roomId}`, { active: 'true' });
 
       const now = Date.now();
@@ -290,7 +318,7 @@ io.on('connection', async (socket: Socket & { data: { user: { sub: string; usern
         pubClient.hSet(`room:${roomId}`, { clockW: JSON.stringify({ remainingTime: JSON.parse(data.clockW).remainingTime, lastTimestamp: now }) }),
         pubClient.hSet(`room:${roomId}`, { clockB: JSON.stringify({ remainingTime: JSON.parse(data.clockB).remainingTime, lastTimestamp: now }) }),
       ]);
-
+      io.to(roomId).emit('gameStart');
       const rawClockW = await pubClient.hGet(`room:${roomId}`, 'clockW');
       if (!rawClockW) throw new Error('Missing clockW');
       const clockW = JSON.parse(rawClockW.toString());
@@ -300,7 +328,8 @@ io.on('connection', async (socket: Socket & { data: { user: { sub: string; usern
       if (!rawClockB) throw new Error('Missing clockB');
       const clockB = JSON.parse(rawClockB.toString());
       const bRemaining = clockB.remainingTime;
-
+      
+      // console.log("Reached here");
       io.to(roomId).emit('clockUpdate', {
         w: wRemaining,
         b: bRemaining,
@@ -314,9 +343,13 @@ io.on('connection', async (socket: Socket & { data: { user: { sub: string; usern
   socket.on('sendMessage', async (msg: string | MessageParams) => {
     let p: MessageParams;
     if (typeof msg === 'string') {
-      try { p = JSON.parse(msg); }
-      catch { return socket.emit('error', 'Invalid message payload'); }
-    } else {
+      try{
+        p = JSON.parse(msg);
+      }
+      catch{
+        return socket.emit('error', 'Invalid message payload');
+      }
+    } else{
       p = msg;
     }
     const roomId = socket.data.roomId
@@ -337,11 +370,17 @@ io.on('connection', async (socket: Socket & { data: { user: { sub: string; usern
     }
     // Validate previous game state
     if (data.fen !== p.message.before) {
-      console.log(`data.fen:${data.fen}, before:${p.message.before}`);
+      dbg && console.log(`data.fen:${data.fen}, before:${p.message.before}`);
       return socket.emit('error', 'Stale game state');
     }
     // make a move server side
-    let moveResult = chess.move({ from: p.message.from, to: p.message.to, promotion: p.message.promotion });
+    let moveResult = chess.move(
+      {
+        from: p.message.from,
+        to: p.message.to,
+        promotion: p.message.promotion 
+      }
+    );
     if (!moveResult || chess.fen() !== p.message.after) {
       return socket.emit('error', 'Invalid move');
     }
@@ -359,12 +398,16 @@ io.on('connection', async (socket: Socket & { data: { user: { sub: string; usern
 
     // Broadcast clock updates
     const rawClockW = await pubClient.hGet(`room:${roomId}`, 'clockW');
-    if (!rawClockW) throw new Error('Missing clockW');
+    if (!rawClockW){
+      throw new Error('Missing clockW');
+    }
     const clockW = JSON.parse(rawClockW.toString());
     const wRemaining = clockW.remainingTime;
 
     const rawClockB = await pubClient.hGet(`room:${roomId}`, 'clockB');
-    if (!rawClockB) throw new Error('Missing clockB');
+    if (!rawClockB){
+      throw new Error('Missing clockB');
+    }
     const clockB = JSON.parse(rawClockB.toString());
     const bRemaining = clockB.remainingTime;
 
@@ -381,7 +424,9 @@ io.on('connection', async (socket: Socket & { data: { user: { sub: string; usern
     const roomId = socket.data.roomId;
     dbg && console.log(`Socket ${socket.id} disconnected`);
 
-    if (!roomId) return;
+    if (!roomId){
+      return;
+    }
 
     // Tell the other player (if any) that someone left
     io.to(roomId).emit('leftRoom', {
@@ -391,6 +436,17 @@ io.on('connection', async (socket: Socket & { data: { user: { sub: string; usern
   })
 });
 
-server.listen(process.env.port||3001, () => {
-  dbg && console.log('Server running on http://localhost:3001');
+const startServer = async() =>{
+  await connectDB().then( async ()=>{
+    await initUserModel();
+  })
+  server.listen(process.env.port||3001, () => {
+    dbg && console.log('Server running on http://localhost:3001');
+  });
+};
+
+startServer();
+
+process.on("SIGINT", async ()=>{
+  await closeDB();
 });

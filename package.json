@@ -8,7 +8,9 @@
     "build": "tsc",
     "nodemonHelper": "npm run build && node dist/index.js ",
     "dev": "nodemon",
-    "start": "pm2 start dist/index.js --sticky -i 3"
+    "start": "pm2 delete all ; npm run build && pm2 start dist/index.js -i 6",
+    "test": "node tests_gpt/test.js",
+    "logs": "pm2 logs"
   },
   "keywords": [
     "chess",
@@ -22,11 +24,14 @@
     "@types/cookie-parser": "^1.4.9",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.10.2",
+    "node-fetch": "^3.3.2",
+    "socket.io-client": "^4.8.3",
     "typescript": "^5.7.2"
   },
   "dependencies": {
     "@socket.io/admin-ui": "^0.5.1",
     "@socket.io/redis-adapter": "^8.3.0",
+    "@socket.io/sticky": "^1.0.4",
     "bcryptjs": "^3.0.2",
     "chess": "github:jhlywa/chess.js",
     "cookie-parser": "^1.4.7",
@@ -34,6 +39,7 @@
     "dotenv": "^17.2.0",
     "express": "^4.21.2",
     "jsonwebtoken": "^9.0.2",
+    "mongodb": "^7.1.0",
     "redis": "^5.6.0",
     "socket.io": "^4.8.1",
     "uuid": "^11.1.0"
